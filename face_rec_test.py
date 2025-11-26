@@ -6,12 +6,12 @@ import time
 import pickle
 from datetime import datetime
 
+
+# FPS settings
 # -------------------------------
-# SETTINGS (TUNE THESE FOR SPEED)
-# -------------------------------
-CAMERA_RESOLUTION = (640, 480)   # Lower = faster
-CV_SCALER = 6                    # Higher = faster, less accurate
-PROCESS_EVERY = 2                # Process every Nth frame (2 = good balance)
+CAMERA_RESOLUTION = (640, 480)   
+CV_SCALER = 6                    
+PROCESS_EVERY = 2                # Process every Nth frame 
 LOG_COOLDOWN = 10                # Seconds between logs per person
 # -------------------------------
 
@@ -105,8 +105,8 @@ def calculate_fps():
     return fps
 
 
-# -----------------------------
-#          MAIN LOOP
+
+# main
 # -----------------------------
 print("[INFO] Starting high-FPS face recognition...")
 
