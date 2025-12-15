@@ -5,13 +5,23 @@ from picamera2 import Picamera2
 import time
 import pickle
 from datetime import datetime
+from database import get_or_create_person, log_attendance
 
+
+# camera settings 
+
+<<<<<<< HEAD
 
 # FPS settings
 # -------------------------------
 CAMERA_RESOLUTION = (640, 480)   
 CV_SCALER = 6                    
 PROCESS_EVERY = 2                # Process every Nth frame 
+=======
+CAMERA_RESOLUTION = (640, 480)   # Lower = faster
+CV_SCALER = 6                    # Higher = faster, less accurate
+PROCESS_EVERY = 2                # Process every Nth frame (2 = good balance)
+>>>>>>> faf4e10 (Christmas demo code)
 LOG_COOLDOWN = 10                # Seconds between logs per person
 # -------------------------------
 
@@ -64,12 +74,20 @@ def process_frame(frame):
         if matches[best_match_index]:
             name = known_face_names[best_match_index]
 
+            # Get the person's ID from the DB
+            person_id = get_or_create_person(name)
+
             # Anti-spam logging
             now = time.time()
             if name not in last_seen or (now - last_seen[name]) > LOG_COOLDOWN:
                 now_str = datetime.now().strftime("%H:%M:%S")
                 print(f"{name} is here at {now_str}")
+
+                # Log attendance to DB
+                log_attendance(person_id)
+
                 last_seen[name] = now
+
 
         face_names.append(name)
 
@@ -107,7 +125,10 @@ def calculate_fps():
 
 
 # main
+
 # -----------------------------
+
+
 print("[INFO] Starting high-FPS face recognition...")
 
 while True:

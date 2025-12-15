@@ -1,11 +1,12 @@
 import cv2
 import os
+from database import get_or_create_person, store_image_path
 from datetime import datetime
 from picamera2 import Picamera2
 import time
 import sys
 
-# Change this to the name of the person you're photographing
+
 # Get name from command-line argument
 if len(sys.argv) > 1:
     PERSON_NAME = sys.argv[1]
@@ -46,14 +47,20 @@ def capture_photos(name):
         
         key = cv2.waitKey(1) & 0xFF
         
-        if key == ord(' '):  # Space key
+        if key == ord(' '):  
             photo_count += 1
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{name}_{timestamp}.jpg"
             filepath = os.path.join(folder, filename)
+
             cv2.imwrite(filepath, frame)
             print(f"Photo {photo_count} saved: {filepath}")
-        
+
+            # Save path to DB
+            person_id = get_or_create_person(name)
+            store_image_path(person_id, filepath)
+
+            
         elif key == ord('q'):  # Q key
             break
     
