@@ -1,73 +1,52 @@
 import cv2
 import os
-from database import get_or_create_person, store_image_path
 from datetime import datetime
 from picamera2 import Picamera2
 import time
 import sys
 
-
-# Get name from command-line argument
 if len(sys.argv) > 1:
     PERSON_NAME = sys.argv[1]
 else:
-    PERSON_NAME = "unknown"
+    PERSON_NAME = input("Enter person name: ")
 
 def create_folder(name):
-    dataset_folder = "dataset"
-    if not os.path.exists(dataset_folder):
-        os.makedirs(dataset_folder)
-    
-    person_folder = os.path.join(dataset_folder, name)
-    if not os.path.exists(person_folder):
-        os.makedirs(person_folder)
+    person_folder = os.path.join("dataset", name)
+    os.makedirs(person_folder, exist_ok=True)
     return person_folder
 
 def capture_photos(name):
     folder = create_folder(name)
-    
-    # Initialize the camera
-    picam2 = Picamera2()
-    picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
-    picam2.start()
 
-    # Allow camera to warm up
+    picam2 = Picamera2()
+    picam2.configure(picam2.create_preview_configuration(
+        main={"format": "XRGB8888", "size": (640, 480)}
+    ))
+    picam2.start()
     time.sleep(2)
 
     photo_count = 0
-    
     print(f"Taking photos for {name}. Press SPACE to capture, 'q' to quit.")
-    
+
     while True:
-        # Capture frame from Pi Camera
         frame = picam2.capture_array()
-        
-        # Display the frame
-        cv2.imshow('Capture', frame)
-        
+        cv2.imshow("Capture", frame)
+
         key = cv2.waitKey(1) & 0xFF
-        
-        if key == ord(' '):  
+
+        if key == ord(" "):
             photo_count += 1
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{name}_{timestamp}.jpg"
-            filepath = os.path.join(folder, filename)
-
+            filepath = os.path.join(folder, f"{name}_{timestamp}.jpg")
             cv2.imwrite(filepath, frame)
             print(f"Photo {photo_count} saved: {filepath}")
 
-            # Save path to DB
-            person_id = get_or_create_person(name)
-            store_image_path(person_id, filepath)
-
-            
-        elif key == ord('q'):  # Q key
+        elif key == ord("q"):
             break
-    
-    # Clean up
+
     cv2.destroyAllWindows()
     picam2.stop()
-    print(f"Photo capture completed. {photo_count} photos saved for {name}.")
+    print(f"Done. {photo_count} photos saved for {name} in {folder}/")
 
 if __name__ == "__main__":
     capture_photos(PERSON_NAME)

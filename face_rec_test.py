@@ -5,25 +5,22 @@ from picamera2 import Picamera2
 import time
 import pickle
 from datetime import datetime
-from database import get_or_create_person, log_attendance
+import requests
 
-
-# camera settings 
-
-<<<<<<< HEAD
-
-# FPS settings
 # -------------------------------
-CAMERA_RESOLUTION = (640, 480)   
-CV_SCALER = 6                    
-PROCESS_EVERY = 2                # Process every Nth frame 
-=======
+# SETTINGS (TUNE THESE FOR SPEED)
+# -------------------------------
 CAMERA_RESOLUTION = (640, 480)   # Lower = faster
 CV_SCALER = 6                    # Higher = faster, less accurate
-PROCESS_EVERY = 2                # Process every Nth frame (2 = good balance)
->>>>>>> faf4e10 (Christmas demo code)
+PROCESS_EVERY = 2                # Process every Nth frame
 LOG_COOLDOWN = 10                # Seconds between logs per person
+
 # -------------------------------
+# API SETTINGS
+# -------------------------------
+API_BASE = "http://127.0.0.1:8000"          # FastAPI running on the Pi
+DEVICE_KEY = "raspberrypi4fyp" # must match DEVICE_API_KEY in backend .env
+
 
 print("[INFO] Loading encodings...")
 with open("encodings.pickle", "rb") as f:
@@ -33,13 +30,14 @@ known_face_names = data["names"]
 
 # Camera setup
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(
-    main={"format": 'XRGB8888', "size": CAMERA_RESOLUTION}
-))
+picam2.configure(
+    picam2.create_preview_configuration(
+        main={"format": "XRGB8888", "size": CAMERA_RESOLUTION}
+    )
+)
 picam2.start()
 
 face_locations = []
-face_encodings = []
 face_names = []
 frame_count = 0
 start_time = time.time()
@@ -50,44 +48,68 @@ frame_id = 0
 last_seen = {}
 
 
+def toggle_clock(person_name: str, confidence: float | None = None):
+    """Call FastAPI to toggle IN/OUT for an employee."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/clock/toggle",
+            headers={"X-Device-Key": DEVICE_KEY},
+            json={"name": person_name, "confidence": confidence},
+            timeout=3,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print("[API] toggle failed:", e)
+        return None
+
+
 def process_frame(frame):
     """Downscale, detect, encode and identify faces."""
-    global face_locations, face_encodings, face_names, last_seen
+    global face_locations, face_names, last_seen
 
     # Fast resize
-    resized_frame = cv2.resize(frame, (0, 0), fx=(1/CV_SCALER), fy=(1/CV_SCALER), interpolation=cv2.INTER_NEAREST)
-    rgb = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+    resized = cv2.resize(
+        frame, (0, 0),
+        fx=(1 / CV_SCALER), fy=(1 / CV_SCALER),
+        interpolation=cv2.INTER_NEAREST
+    )
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-    # Fast HOG face detection (default)
-    face_locations = face_recognition.face_locations(rgb)
+    # Detect + encode
+    face_locations = face_recognition.face_locations(rgb)  # HOG default
     face_encodings = face_recognition.face_encodings(rgb, face_locations)
 
     face_names = []
 
     for face_encoding in face_encodings:
-        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         name = "Unknown"
-
+        
+        if not known_face_encodings:
+            face_names.append(name)
+            continue
+        
+        # Compare
         face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-        best_match_index = np.argmin(face_distances)
+        best_match_index = int(np.argmin(face_distances))
+
+        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
 
         if matches[best_match_index]:
             name = known_face_names[best_match_index]
 
-            # Get the person's ID from the DB
-            person_id = get_or_create_person(name)
-
-            # Anti-spam logging
             now = time.time()
             if name not in last_seen or (now - last_seen[name]) > LOG_COOLDOWN:
                 now_str = datetime.now().strftime("%H:%M:%S")
-                print(f"{name} is here at {now_str}")
+                print(f"{name} recognised at {now_str}")
 
-                # Log attendance to DB
-                log_attendance(person_id)
+                confidence = float(face_distances[best_match_index])
+                result = toggle_clock(name, confidence=confidence)
+                
+                if result and result.get("current"):
+                    print(f"[API] NEW status: {result['current']['status']}")
 
                 last_seen[name] = now
-
 
         face_names.append(name)
 
@@ -105,9 +127,10 @@ def draw_results(frame):
 
         cv2.rectangle(frame, (left, top), (right, bottom), (244, 42, 3), 2)
         cv2.rectangle(frame, (left, top - 30), (right, top), (244, 42, 3), -1)
-        cv2.putText(frame, name, (left + 5, top - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-
+        cv2.putText(
+            frame, name, (left + 5, top - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1
+        )
     return frame
 
 
@@ -121,12 +144,6 @@ def calculate_fps():
         frame_count = 0
         start_time = time.time()
     return fps
-
-
-
-# main
-
-# -----------------------------
 
 
 print("[INFO] Starting high-FPS face recognition...")
@@ -145,14 +162,18 @@ while True:
 
     # Show FPS
     current_fps = calculate_fps()
-    cv2.putText(display_frame, f"FPS: {current_fps:.1f}",
-                (display_frame.shape[1] - 150, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(
+        display_frame, f"FPS: {current_fps:.1f}",
+        (display_frame.shape[1] - 150, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
+    )
 
     # Live clock
     now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cv2.putText(display_frame, now_time, (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+    cv2.putText(
+        display_frame, now_time, (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2
+    )
 
     cv2.imshow("Video", display_frame)
 
