@@ -18,8 +18,8 @@ LOG_COOLDOWN = 10                # Seconds between logs per person
 # -------------------------------
 # API SETTINGS
 # -------------------------------
-API_BASE = "http://127.0.0.1:8000"          # FastAPI running on the Pi
-DEVICE_KEY = "raspberrypi4fyp" # must match DEVICE_API_KEY in backend .env
+API_BASE = "http://127.0.0.1:8000"# FastAPI running on the Pi
+DEVICE_KEY = "raspberrypi4fyp"
 
 
 print("[INFO] Loading encodings...")
@@ -89,7 +89,7 @@ def process_frame(frame):
             face_names.append(name)
             continue
         
-        # Compare
+        # Compare faces
         face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
         best_match_index = int(np.argmin(face_distances))
 

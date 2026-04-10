@@ -4,6 +4,7 @@ load_dotenv()
 import os
 import asyncio
 import json
+import httpx
 from datetime import datetime, timezone, date
 from typing import AsyncGenerator
 
@@ -16,11 +17,9 @@ from db import get_conn
 from models import init_db
 from auth_firebase import get_current_user, get_current_user_optional
 from auth_device import require_device_key
+from firebase_admin import auth as firebase_auth
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -28,11 +27,9 @@ def parse_origins() -> list[str]:
     raw = os.environ.get("CORS_ORIGINS", "http://localhost:3000")
     return [o.strip() for o in raw.split(",") if o.strip()]
 
-# ---------------------------------------------------------------------------
 # SSE broadcast
-# ---------------------------------------------------------------------------
 # A simple in-process queue list. Each connected SSE client registers a queue.
-# When a clock event fires we push to every queue.
+# When a clock event fires i push to every queue.
 
 _sse_clients: list[asyncio.Queue] = []
 
@@ -45,11 +42,20 @@ async def _broadcast(payload: dict):
             dead.append(q)
     for q in dead:
         _sse_clients.remove(q)
+        
+async def send_password_reset_email(email: str):
+    api_key = os.environ.get("FIREBASE_WEB_API_KEY")
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json={
+            "requestType": "PASSWORD_RESET",
+            "email": email,
+        })
+        if r.status_code != 200:
+            print(f"[Firebase] Email send failed: {r.text}")
 
-# ---------------------------------------------------------------------------
+
 # App
-# ---------------------------------------------------------------------------
-
 app = FastAPI(title="Smart Punch-In API")
 
 app.add_middleware(
@@ -60,10 +66,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
 
+# Pydantic models
 class ToggleRequest(BaseModel):
     employee_id: int | None = None
     email: str | None = None
@@ -74,19 +78,17 @@ class UpdateEmployeeRequest(BaseModel):
     name: str | None = None
     email: str | None = None
     is_admin: bool | None = None
+    
+class CreateEmployeeRequest(BaseModel):
+    name: str
+    email: str
 
-# ---------------------------------------------------------------------------
 # Startup
-# ---------------------------------------------------------------------------
-
 @app.on_event("startup")
 def startup():
     init_db(os.environ.get("DB_PATH", "attendance.db"))
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
-
 def _get_employee_by_uid(firebase_uid: str) -> dict | None:
     conn = get_conn()
     cur = conn.cursor()
@@ -96,11 +98,11 @@ def _get_employee_by_uid(firebase_uid: str) -> dict | None:
     return dict(row) if row else None
 
 def get_or_link_employee(firebase_uid: str, email: str | None, name: str | None = None) -> dict:
-    """
-    Find employee by firebase_uid.
-    If not found, try matching by email (user existed before Firebase link).
-    If still not found, create a new record.
-    """
+
+    #Find employee by firebase_uid.
+    #If not found, it will try matching by email
+    #If still not found, create a new record.
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -108,7 +110,7 @@ def get_or_link_employee(firebase_uid: str, email: str | None, name: str | None 
     cur.execute("SELECT * FROM employees WHERE firebase_uid=?", (firebase_uid,))
     row = cur.fetchone()
     if row:
-        # Opportunistically back-fill missing email/name
+        # when the opportunity arise back fill missing email or name
         emp = dict(row)
         updates, params = [], []
         if email and not emp.get("email"):
@@ -124,7 +126,7 @@ def get_or_link_employee(firebase_uid: str, email: str | None, name: str | None 
         conn.close()
         return dict(row)
 
-    # 2. Try linking by email (employee pre-created without Firebase UID)
+    # 2. Try linking by email if employee was pre created without Firebase UID
     if email:
         cur.execute("SELECT * FROM employees WHERE email=? AND (firebase_uid IS NULL OR firebase_uid='')", (email,))
         row = cur.fetchone()
@@ -230,9 +232,9 @@ def calculate_daily_hours(employee_id: int, target_date: str) -> float:
             last_in = None
     return round(total_seconds / 3600, 2)
 
-# ---------------------------------------------------------------------------
-# Employee (self) endpoints
-# ---------------------------------------------------------------------------
+
+# Employee endpoints
+
 
 @app.get("/me")
 async def me(user=Depends(get_current_user)):
@@ -264,9 +266,9 @@ async def me_hours(target_date: str = Query(default=None), user=Depends(get_curr
     hours = calculate_daily_hours(employee["id"], d)
     return {"employee_id": employee["id"], "date": d, "hours": hours}
 
-# ---------------------------------------------------------------------------
-# Device endpoint: Raspberry Pi face recognition
-# ---------------------------------------------------------------------------
+
+# Raspberry Pi face recognition endpoints
+
 
 @app.post("/clock/toggle")
 async def clock_toggle(payload: ToggleRequest, _=Depends(require_device_key)):
@@ -301,22 +303,18 @@ async def clock_toggle(payload: ToggleRequest, _=Depends(require_device_key)):
 
     return {"ok": True, "event": inserted, "current": current}
 
-# ---------------------------------------------------------------------------
-# SSE: live updates for admin / dashboard
-# ---------------------------------------------------------------------------
+
+# SSE: live updates for admin/dashboard
+
 
 @app.get("/events")
 async def sse_stream(user=Depends(get_current_user)):
-    """
-    Server-Sent Events stream. Any clock event is pushed to all connected clients.
-    Works for both employees (their own events) and admins (all events).
-    """
     queue: asyncio.Queue = asyncio.Queue(maxsize=50)
     _sse_clients.append(queue)
 
     async def generator() -> AsyncGenerator[str, None]:
         try:
-            # Send a heartbeat comment every 20 s to keep proxies alive
+            # Send a heartbeat comment every 20s to keep proxies alive
             while True:
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=20)
@@ -340,10 +338,8 @@ async def sse_stream(user=Depends(get_current_user)):
         },
     )
 
-# ---------------------------------------------------------------------------
-# Admin endpoints
-# ---------------------------------------------------------------------------
 
+# Admin endpoints
 @app.get("/admin/employees")
 async def admin_list_employees(user=Depends(get_current_user)):
     require_admin(user)
@@ -425,7 +421,6 @@ async def admin_manual_clock(
     employee_id: int,
     user=Depends(get_current_user),
 ):
-    """Admin can manually toggle clock for any employee."""
     require_admin(user)
     conn = get_conn()
     cur = conn.cursor()
@@ -441,7 +436,7 @@ async def admin_manual_clock(
 
 @app.get("/admin/summary")
 async def admin_summary(target_date: str = Query(default=None), user=Depends(get_current_user)):
-    """Returns all employees with their status and hours for a given date."""
+    #Returns all employees with their status and hours for a given date
     require_admin(user)
     d = target_date or date.today().isoformat()
 
@@ -465,3 +460,79 @@ async def admin_summary(target_date: str = Query(default=None), user=Depends(get
         "currently_out": len(result) - total_in,
         "employees": result,
     }
+
+@app.post("/admin/employees/link")
+async def admin_link_employee(
+    body: CreateEmployeeRequest,
+    user=Depends(get_current_user),
+):
+    require_admin(user)
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        #find the existing employee by name
+        cur.execute(
+            "SELECT * FROM employees WHERE LOWER(name)=LOWER(?)",
+            (body.name,)
+        )
+        existing = cur.fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"No employee named '{body.name}' found")
+
+        existing = dict(existing)
+
+        #block if they already have an email linked
+        if existing.get("email"):
+            raise HTTPException(status_code=400, detail=f"{body.name} already has an email linked: {existing['email']}")
+
+        #check if email isn't taken by someone else
+        cur.execute("SELECT id FROM employees WHERE email=?", (body.email,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="This email is already linked to another employee")
+
+        #create Firebase account
+        try:
+            firebase_user = firebase_auth.create_user(
+                email=body.email,
+                display_name=existing["name"],
+            )
+        except firebase_auth.EmailAlreadyExistsError:
+            raise HTTPException(status_code=400, detail="This email already exists in Firebase")
+
+        #update the existing employee record
+        cur.execute(
+            "UPDATE employees SET firebase_uid=?, email=? WHERE id=?",
+            (firebase_user.uid, body.email, existing["id"])
+        )
+        conn.commit()
+
+        cur.execute("SELECT * FROM employees WHERE id=?", (existing["id"],))
+        row = dict(cur.fetchone())
+
+        #send password setup invite
+        await send_password_reset_email(body.email)
+
+        return {
+            "ok": True,
+            "employee": row,
+            "message": f"Invite sent to {body.email}"
+        }
+
+    finally:
+        conn.close()
+
+@app.get("/admin/employees/unlinked")
+async def admin_unlinked_employees(user=Depends(get_current_user)):
+    require_admin(user)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name FROM employees
+        WHERE email IS NULL
+        ORDER BY name ASC
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return {"employees": rows}

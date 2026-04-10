@@ -29,7 +29,7 @@ def init_db(db_path: str):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_emp_ts ON time_entries(employee_id, ts_utc);")
 
-    # Migration: add is_admin if upgrading from older schema
+    # add is_admin if upgrading from older schema
     try:
         cur.execute("ALTER TABLE employees ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
     except Exception:

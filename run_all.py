@@ -40,9 +40,7 @@ while True:
     print("1. Register new user")
     print("2. Train model")
     print("3. Start recognition")
-    print("4. View recent attendance")
-    print("5. View today's total hours")
-    print("6. Exit")
+    print("4. Exit")
 
     choice = input("Choose an option: ")
 
@@ -57,12 +55,6 @@ while True:
         subprocess.run(["python3", "face_rec_test.py"])
 
     elif choice == "4":
-        show_recent_attendance()
-        
-    elif choice == "5":
-        show_daily_hours()
-
-    elif choice == "6":
         print("Goodbye!")
         break
 

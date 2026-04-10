@@ -4,4 +4,5 @@ encodings.pickle
 dataset/
 __pycache__
 smart-punch-in-firebase-adminsdk-fbsvc-c4c6354377.json
-attendance_old.dbencodings.pickle
+attendance_old.db
+encodings.pickle
