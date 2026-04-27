@@ -29,11 +29,34 @@ def init_db(db_path: str):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_time_entries_emp_ts ON time_entries(employee_id, ts_utc);")
 
-    # add is_admin if upgrading from older schema
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shifts (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time   TEXT NOT NULL
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS roster (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        shift_id    INTEGER NOT NULL,
+        date        TEXT NOT NULL,
+        FOREIGN KEY(employee_id) REFERENCES employees(id),
+        FOREIGN KEY(shift_id)   REFERENCES shifts(id),
+        UNIQUE(employee_id, date)
+    );
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_roster_date ON roster(date);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_roster_emp  ON roster(employee_id);")
+
     try:
         cur.execute("ALTER TABLE employees ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
     except Exception:
-        pass  # Column already exists
+        pass
 
     conn.commit()
     conn.close()

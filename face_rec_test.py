@@ -6,29 +6,38 @@ import time
 import pickle
 from datetime import datetime
 import requests
+import dlib
+from scipy.spatial import distance
 
-# -------------------------------
-# SETTINGS (TUNE THESE FOR SPEED)
-# -------------------------------
-CAMERA_RESOLUTION = (640, 480)   # Lower = faster
-CV_SCALER = 6                    # Higher = faster, less accurate
-PROCESS_EVERY = 2                # Process every Nth frame
-LOG_COOLDOWN = 10                # Seconds between logs per person
+# ── Settings ──────────────────────────────────────────────────────────────────
+CAMERA_RESOLUTION = (640, 480)
+CV_SCALER          = 6
+PROCESS_EVERY      = 2
+LOG_COOLDOWN       = 10       # seconds between clock events per person
+BLINK_COOLDOWN     = 5        # seconds to wait for a blink after recognition
+EAR_THRESHOLD      = 0.28     # below this = eye closed
+EAR_CONSEC_FRAMES  = 1        # frames eye must be closed to count as blink
 
-# -------------------------------
-# API SETTINGS
-# -------------------------------
-API_BASE = "http://127.0.0.1:8000"# FastAPI running on the Pi
+API_BASE   = "http://127.0.0.1:8000"
 DEVICE_KEY = "raspberrypi4fyp"
 
-
+# ── Load face encodings ────────────────────────────────────────────────────────
 print("[INFO] Loading encodings...")
 with open("encodings.pickle", "rb") as f:
     data = pickle.loads(f.read())
 known_face_encodings = data["encodings"]
-known_face_names = data["names"]
+known_face_names     = data["names"]
 
-# Camera setup
+# ── Load dlib landmark detector ────────────────────────────────────────────────
+print("[INFO] Loading landmark detector...")
+detector  = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+# Eye landmark indices
+LEFT_EYE  = list(range(42, 48))
+RIGHT_EYE = list(range(36, 42))
+
+# ── Camera ────────────────────────────────────────────────────────────────────
 picam2 = Picamera2()
 picam2.configure(
     picam2.create_preview_configuration(
@@ -37,24 +46,34 @@ picam2.configure(
 )
 picam2.start()
 
+# ── State ─────────────────────────────────────────────────────────────────────
 face_locations = []
-face_names = []
-frame_count = 0
-start_time = time.time()
-fps = 0
-frame_id = 0
+face_names     = []
+frame_id       = 0
+frame_count    = 0
+start_time     = time.time()
+fps            = 0
 
-# Last time each face was logged
-last_seen = {}
+last_seen      = {}   # name: last clock event time
 
+# Liveness state per person
+liveness       = {}
 
-def toggle_clock(person_name: str, confidence: float | None = None):
-    """Call FastAPI to toggle IN/OUT for an employee."""
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def eye_aspect_ratio(landmarks, eye_indices):
+    pts = np.array([(landmarks.part(i).x, landmarks.part(i).y) for i in eye_indices])
+    A = distance.euclidean(pts[1], pts[5])
+    B = distance.euclidean(pts[2], pts[4])
+    C = distance.euclidean(pts[0], pts[3])
+    return (A + B) / (2.0 * C)
+
+def toggle_clock(name, confidence=None):
     try:
         r = requests.post(
             f"{API_BASE}/clock/toggle",
             headers={"X-Device-Key": DEVICE_KEY},
-            json={"name": person_name, "confidence": confidence},
+            json={"name": name, "confidence": confidence},
             timeout=3,
         )
         r.raise_for_status()
@@ -63,120 +82,157 @@ def toggle_clock(person_name: str, confidence: float | None = None):
         print("[API] toggle failed:", e)
         return None
 
-
-def process_frame(frame):
-    """Downscale, detect, encode and identify faces."""
-    global face_locations, face_names, last_seen
-
-    # Fast resize
-    resized = cv2.resize(
-        frame, (0, 0),
-        fx=(1 / CV_SCALER), fy=(1 / CV_SCALER),
-        interpolation=cv2.INTER_NEAREST
+def check_blink(frame_gray, face_loc):
+    """
+    Given a grayscale frame and a face location tuple (top,right,bottom,left),
+    returns the average EAR for both eyes.
+    """
+    top, right, bottom, left = face_loc
+    # Scale back up since we downscaled for recognition
+    rect = dlib.rectangle(
+        left * CV_SCALER, top * CV_SCALER,
+        right * CV_SCALER, bottom * CV_SCALER
     )
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    shape = predictor(frame_gray, rect)
+    left_ear  = eye_aspect_ratio(shape, LEFT_EYE)
+    right_ear = eye_aspect_ratio(shape, RIGHT_EYE)
+    return (left_ear + right_ear) / 2.0
 
-    # Detect + encode
-    face_locations = face_recognition.face_locations(rgb)  # HOG default
-    face_encodings = face_recognition.face_encodings(rgb, face_locations)
+# ── Main loop ─────────────────────────────────────────────────────────────────
+print("[INFO] Starting face recognition with liveness detection...")
 
-    face_names = []
+while True:
+    frame    = picam2.capture_array()
+    frame_id += 1
 
-    for face_encoding in face_encodings:
-        name = "Unknown"
-        
-        if not known_face_encodings:
-            face_names.append(name)
-            continue
-        
-        # Compare faces
-        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-        best_match_index = int(np.argmin(face_distances))
+    # Convert to grayscale for dlib (full resolution)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
-
-        if matches[best_match_index]:
-            name = known_face_names[best_match_index]
-
-            now = time.time()
-            if name not in last_seen or (now - last_seen[name]) > LOG_COOLDOWN:
-                now_str = datetime.now().strftime("%H:%M:%S")
-                print(f"{name} recognised at {now_str}")
-
-                confidence = float(face_distances[best_match_index])
-                result = toggle_clock(name, confidence=confidence)
-                
-                if result and result.get("current"):
-                    print(f"[API] NEW status: {result['current']['status']}")
-
-                last_seen[name] = now
-
-        face_names.append(name)
-
-    return frame
-
-
-def draw_results(frame):
-    """Draw boxes and names on the output frame."""
-    for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Re-scale face box
-        top *= CV_SCALER
-        right *= CV_SCALER
-        bottom *= CV_SCALER
-        left *= CV_SCALER
-
-        cv2.rectangle(frame, (left, top), (right, bottom), (244, 42, 3), 2)
-        cv2.rectangle(frame, (left, top - 30), (right, top), (244, 42, 3), -1)
-        cv2.putText(
-            frame, name, (left + 5, top - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1
+    # Downscale for face recognition
+    if frame_id % PROCESS_EVERY == 0:
+        resized = cv2.resize(
+            frame, (0, 0),
+            fx=1/CV_SCALER, fy=1/CV_SCALER,
+            interpolation=cv2.INTER_NEAREST
         )
-    return frame
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
+        face_locations = face_recognition.face_locations(rgb)
+        face_encodings = face_recognition.face_encodings(rgb, face_locations)
+        face_names     = []
 
-def calculate_fps():
-    """FPS counter."""
-    global frame_count, start_time, fps
+        for face_encoding, face_loc in zip(face_encodings, face_locations):
+            name = "Unknown"
+
+            if known_face_encodings:
+                distances        = face_recognition.face_distance(known_face_encodings, face_encoding)
+                best_idx         = int(np.argmin(distances))
+                matches          = face_recognition.compare_faces(known_face_encodings, face_encoding)
+
+                if matches[best_idx]:
+                    name       = known_face_names[best_idx]
+                    confidence = float(distances[best_idx])
+                    now        = time.time()
+
+                    # ── Liveness check ──────────────────────────────────────
+                    if name not in liveness:
+                        liveness[name] = {
+                            "waiting":    False,
+                            "deadline":   0,
+                            "ear_consec": 0,
+                            "confirmed":  False,
+                        }
+
+                    state = liveness[name]
+
+                    # Start liveness window if not already waiting
+                    # and cooldown has passed
+                    cooldown_ok = (name not in last_seen or
+                                   now - last_seen[name] > LOG_COOLDOWN)
+
+                    if cooldown_ok and not state["waiting"]:
+                        state["waiting"]    = True
+                        state["deadline"]   = now + BLINK_COOLDOWN
+                        state["ear_consec"] = 0
+                        state["confirmed"]  = False
+                        print(f"[LIVENESS] Waiting for blink from {name}...")
+
+                    # Check EAR while waiting
+                    if state["waiting"] and not state["confirmed"]:
+                        try:
+                            ear = check_blink(gray, face_loc)
+                            if ear < EAR_THRESHOLD:
+                                state["ear_consec"] += 1
+                            else:
+                                if state["ear_consec"] >= EAR_CONSEC_FRAMES:
+                                    # Blink confirmed!
+                                    print(f"[LIVENESS] Blink confirmed for {name}")
+                                    state["confirmed"] = True
+                                    state["waiting"]   = False
+                                    last_seen[name]    = now
+
+                                    result = toggle_clock(name, confidence)
+                                    if result and result.get("current"):
+                                        print(f"[API] {name} → {result['current']['status']}")
+                                state["ear_consec"] = 0
+
+                        except Exception as e:
+                            print(f"[LIVENESS] EAR error: {e}")
+
+                        # Timeout — no blink detected
+                        if now > state["deadline"]:
+                            print(f"[LIVENESS] Timeout for {name} — liveness failed")
+                            state["waiting"]    = False
+                            state["ear_consec"] = 0
+                            # Reset so they can try again after cooldown
+                            last_seen[name]     = now - (LOG_COOLDOWN - 3)
+
+            face_names.append(name)
+
+    # ── Draw ──────────────────────────────────────────────────────────────────
+    for (top, right, bottom, left), name in zip(face_locations, face_names):
+        top    *= CV_SCALER
+        right  *= CV_SCALER
+        bottom *= CV_SCALER
+        left   *= CV_SCALER
+
+        state  = liveness.get(name, {})
+        waiting = state.get("waiting", False)
+
+        # Box colour: yellow while waiting for blink, green/red otherwise
+        colour = (0, 255, 255) if waiting else (244, 42, 3)
+
+        cv2.rectangle(frame, (left, top), (right, bottom), colour, 2)
+        cv2.rectangle(frame, (left, top - 30), (right, top), colour, -1)
+        cv2.putText(frame, name, (left + 5, top - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+
+        # Show liveness prompt below the box
+        if waiting:
+            time_left = max(0, round(state["deadline"] - time.time(), 1))
+            cv2.putText(
+                frame,
+                f"Blink to confirm ({time_left}s)",
+                (left, bottom + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1
+            )
+
+    # FPS counter
     frame_count += 1
     elapsed = time.time() - start_time
     if elapsed >= 1:
-        fps = frame_count / elapsed
+        fps         = frame_count / elapsed
         frame_count = 0
-        start_time = time.time()
-    return fps
+        start_time  = time.time()
 
+    cv2.putText(frame, f"FPS: {fps:.1f}",
+                (frame.shape[1] - 150, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-print("[INFO] Starting high-FPS face recognition...")
+    cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
-while True:
-    frame = picam2.capture_array()
-    frame_id += 1
-
-    # Process every N frames
-    if frame_id % PROCESS_EVERY == 0:
-        processed_frame = process_frame(frame)
-    else:
-        processed_frame = frame
-
-    display_frame = draw_results(processed_frame)
-
-    # Show FPS
-    current_fps = calculate_fps()
-    cv2.putText(
-        display_frame, f"FPS: {current_fps:.1f}",
-        (display_frame.shape[1] - 150, 30),
-        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
-    )
-
-    # Live clock
-    now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cv2.putText(
-        display_frame, now_time, (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2
-    )
-
-    cv2.imshow("Video", display_frame)
-
+    cv2.imshow("PunchIn", frame)
     if cv2.waitKey(1) == ord("q"):
         break
 
